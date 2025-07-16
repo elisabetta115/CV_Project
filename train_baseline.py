@@ -106,11 +106,37 @@ def train_baseline_model(args):
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, args.epochs)
     
-    # Training loop
+    # Initialize training variables
+    start_epoch = 0
     best_val_acc = 0
     train_history = {'loss': [], 'train_acc': [], 'val_acc': []}
     
-    for epoch in range(args.epochs):
+    # Resume from checkpoint if provided
+    if args.resume:
+        print(f"\nResuming training from checkpoint: {args.resume}")
+        try:
+            checkpoint = torch.load(args.resume, map_location=DEVICE)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            start_epoch = checkpoint['epoch'] + 1
+            best_val_acc = checkpoint['val_acc']
+            train_history = checkpoint.get('train_history', train_history)
+            
+            # Recreate scheduler and step to correct position
+            scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, args.epochs)
+            for _ in range(start_epoch):
+                scheduler.step()
+            
+            print(f"Resumed from epoch {start_epoch}, best val acc: {best_val_acc:.2f}%")
+        except Exception as e:
+            print(f"Error loading checkpoint: {e}")
+            print("Starting training from scratch...")
+            start_epoch = 0
+            best_val_acc = 0
+            train_history = {'loss': [], 'train_acc': [], 'val_acc': []}
+    
+    # Training loop
+    for epoch in range(start_epoch, args.epochs):
         # Train
         train_loss, train_acc = train_epoch(
             model, train_loader, criterion, optimizer, epoch, DEVICE
