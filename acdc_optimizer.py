@@ -1,154 +1,401 @@
 import torch
 import torch.nn as nn
-import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-import numpy as np
 import copy
 import argparse
 
 from globals import *
-from models import VisionTransformer, MultiHeadAttention, MLP
-from utils import set_seed, count_parameters, create_tiny_imagenet_datasets, EdgeImportanceTracker
-from train_baseline import train_epoch, evaluate, collate_fn
+from models import VisionTransformer, PrunedMultiHeadAttention, PrunedMLP
+from data import create_tiny_imagenet_datasets, collate_fn
+
+from utils import set_seed, count_effective_parameters
 
 
 class ACDCOptimizer:
-    """ACDC-based model optimization"""
+    """ACDC-based model optimization with practical speedups"""
     def __init__(self, model, dataloader, threshold=0.01, device='cuda'):
         self.model = model
         self.dataloader = dataloader
         self.threshold = threshold
         self.device = device
-        self.tracker = EdgeImportanceTracker()
-    
-    def analyze_edges(self, num_batches=20):
-        """Analyze edge importance using forward passes"""
-        print("Analyzing edge importance...")
-        self.model.eval()
-        self.tracker.register_hooks(self.model)
+        self.reference_outputs = None
         
+    def compute_reference_outputs(self, num_batches=20):
+        """Compute outputs from the full model for KL divergence calculation"""
+        self.model.eval()
+        outputs = []
+        inputs = []
         with torch.no_grad():
-            for i, (images, _) in enumerate(tqdm(self.dataloader)):
+            for i, (images, _) in enumerate(self.dataloader):
                 if i >= num_batches:
                     break
                 images = images.to(self.device)
-                _ = self.model(images)
-        
-        self.tracker.remove_hooks()
-        importance_scores = self.tracker.get_edge_importance()
-        
-        return importance_scores
+                out = self.model(images)
+                outputs.append(out)
+                inputs.append(images)
+        self.reference_outputs = torch.cat(outputs, dim=0)
+        self.reference_inputs = torch.cat(inputs, dim=0)
+        return self.reference_outputs
     
-    def create_edge_masks(self, importance_scores):
-        """Create masks for pruning unimportant edges"""
+    def compute_kl_divergence_batch(self, model):
+        """Compute KL divergence using cached inputs"""
+        model.eval()
+        with torch.no_grad():
+            current_outputs = model(self.reference_inputs)
+        
+        # Compute KL divergence
+        log_probs_ref = torch.log_softmax(self.reference_outputs, dim=-1)
+        log_probs_current = torch.log_softmax(current_outputs, dim=-1)
+        kl_div = torch.nn.functional.kl_div(log_probs_current, log_probs_ref.exp(), 
+                                            reduction='batchmean', log_target=False)
+        return kl_div.item()
+    
+    def get_component_edges(self):
+        """Get edges grouped by components for efficient processing"""
+        components = []
+        
+        # Entire transformer blocks (most coarse-grained)
+        for block_idx in range(NUM_LAYERS):
+            components.append({
+                'name': f'block_{block_idx}',
+                'type': 'block',
+                'block_idx': block_idx
+            })
+        
+        # Attention heads (medium-grained)
+        for block_idx in range(NUM_LAYERS):
+            for head_idx in range(NUM_HEADS):
+                components.append({
+                    'name': f'block_{block_idx}_head_{head_idx}',
+                    'type': 'attention_head',
+                    'block_idx': block_idx,
+                    'head_idx': head_idx
+                })
+        
+        # MLP neurons in groups (fine-grained but not individual connections)
+        for block_idx in range(NUM_LAYERS):
+            # Group FC1 neurons into chunks
+            fc1_size = MLP_DIM
+            chunk_size = max(32, fc1_size // 20)  # At most 20 chunks per layer
+            for chunk_start in range(0, fc1_size, chunk_size):
+                chunk_end = min(chunk_start + chunk_size, fc1_size)
+                components.append({
+                    'name': f'block_{block_idx}_fc1_chunk_{chunk_start}_{chunk_end}',
+                    'type': 'mlp_fc1_chunk',
+                    'block_idx': block_idx,
+                    'start': chunk_start,
+                    'end': chunk_end
+                })
+            
+            # Group FC2 output neurons
+            fc2_size = EMBED_DIM
+            chunk_size = max(32, fc2_size // 10)
+            for chunk_start in range(0, fc2_size, chunk_size):
+                chunk_end = min(chunk_start + chunk_size, fc2_size)
+                components.append({
+                    'name': f'block_{block_idx}_fc2_chunk_{chunk_start}_{chunk_end}',
+                    'type': 'mlp_fc2_chunk',
+                    'block_idx': block_idx,
+                    'start': chunk_start,
+                    'end': chunk_end
+                })
+        
+        # Other components
+        components.extend([
+            {'name': 'cls_token', 'type': 'cls_token'},
+            {'name': 'pos_embed', 'type': 'pos_embed'},
+        ])
+        
+        # Reverse order for reverse topological processing
+        return components[::-1]
+    
+    def create_masked_model(self, removed_components):
+        """Create a model with components removed (without deep copy for each test)"""
+        # Create a registry of masks
         masks = {}
         
-        # Get all scores and calculate threshold
-        all_scores = list(importance_scores.values())
-        if not all_scores:
-            print("Warning: No importance scores found")
-            return masks
-        
-        # Use percentile-based threshold
-        threshold_value = np.percentile(all_scores, self.threshold * 100)
-        
-        print(f"Edge importance statistics:")
-        print(f"  - Min: {np.min(all_scores):.6f}")
-        print(f"  - Max: {np.max(all_scores):.6f}")
-        print(f"  - Mean: {np.mean(all_scores):.6f}")
-        print(f"  - Threshold (percentile {self.threshold*100}%): {threshold_value:.6f}")
-        
-        # Create binary masks
-        pruned_count = 0
-        for name, score in importance_scores.items():
-            if score < threshold_value:
-                masks[name] = 0.0
-                pruned_count += 1
-            else:
-                masks[name] = 1.0
-        
-        print(f"Pruning {pruned_count}/{len(importance_scores)} edges ({pruned_count/len(importance_scores)*100:.1f}%)")
+        for comp in removed_components:
+            if comp['type'] == 'block':
+                # Mask entire block
+                masks[f"block_{comp['block_idx']}_mask"] = 0.0
+            
+            elif comp['type'] == 'attention_head':
+                # Mask specific attention head
+                key = f"block_{comp['block_idx']}_attn_head_{comp['head_idx']}"
+                masks[key] = 0.0
+            
+            elif comp['type'] == 'mlp_fc1_chunk':
+                # Mask FC1 neurons
+                key = f"block_{comp['block_idx']}_fc1_{comp['start']}_{comp['end']}"
+                masks[key] = 0.0
+            
+            elif comp['type'] == 'mlp_fc2_chunk':
+                # Mask FC2 neurons
+                key = f"block_{comp['block_idx']}_fc2_{comp['start']}_{comp['end']}"
+                masks[key] = 0.0
+            
+            elif comp['type'] == 'cls_token':
+                masks['cls_token'] = 0.0
+            
+            elif comp['type'] == 'pos_embed':
+                masks['pos_embed'] = 0.0
         
         return masks
     
-    def apply_masks(self, masks):
-        """Apply edge masks to model"""
-        optimized_model = copy.deepcopy(self.model)
-        optimized_model = optimized_model.to(self.device)
+    def apply_masks_to_model(self, model, masks):
+        """Apply masks efficiently using hooks instead of modifying weights"""
+        hooks = []
         
-        # Apply masks to attention and MLP layers
-        for name, module in optimized_model.named_modules():
-            if isinstance(module, MultiHeadAttention):
-                # Create attention mask
-                mask_tensor = torch.ones(1, module.num_heads, 1, 1).to(self.device)
-                
-                # Check if this attention module should be pruned
-                for mask_name, importance in masks.items():
-                    if name in mask_name and 'attn' in mask_name and importance == 0.0:
-                        # Prune specific attention heads based on importance
-                        head_idx = hash(mask_name) % module.num_heads
-                        mask_tensor[0, head_idx, 0, 0] = 0.0
-                
-                module.set_edge_mask(mask_tensor)
+        def create_attention_mask_hook(head_indices_to_mask):
+            def hook(module, input, output):
+                B, N, C = input[0].shape
+                # Reshape output to separate heads
+                output_reshaped = output.view(B, N, NUM_HEADS, C // NUM_HEADS)
+                # Zero out masked heads
+                for head_idx in head_indices_to_mask:
+                    output_reshaped[:, :, head_idx, :] = 0
+                return output_reshaped.view(B, N, C)
+            return hook
+        
+        def create_mlp_mask_hook(mask_indices, layer='fc1'):
+            def hook(module, input, output):
+                output_clone = output.clone()
+                output_clone[:, :, mask_indices] = 0
+                return output_clone
+            return hook
+        
+        def create_block_mask_hook():
+            def hook(module, input, output):
+                return input[0]  # Return input unchanged (skip block)
+            return hook
+        
+        # Apply hooks based on masks
+        for block_idx in range(NUM_LAYERS):
+            block = model.blocks[block_idx]
             
-            elif isinstance(module, MLP):
-                # Create MLP masks based on importance
-                mask1 = torch.ones(1, 1, module.fc1.out_features).to(self.device)
-                mask2 = torch.ones(1, 1, module.fc2.out_features).to(self.device)
+            # Check if entire block is masked
+            if f"block_{block_idx}_mask" in masks and masks[f"block_{block_idx}_mask"] == 0.0:
+                hook = block.register_forward_hook(create_block_mask_hook())
+                hooks.append(hook)
+                continue
+            
+            # Check attention heads
+            heads_to_mask = []
+            for head_idx in range(NUM_HEADS):
+                key = f"block_{block_idx}_attn_head_{head_idx}"
+                if key in masks and masks[key] == 0.0:
+                    heads_to_mask.append(head_idx)
+            
+            if heads_to_mask:
+                hook = block.attn.proj.register_forward_hook(
+                    create_attention_mask_hook(heads_to_mask)
+                )
+                hooks.append(hook)
+            
+            # Check MLP chunks
+            fc1_indices_to_mask = []
+            fc2_indices_to_mask = []
+            
+            for key, value in masks.items():
+                if f"block_{block_idx}_fc1_" in key and value == 0.0:
+                    parts = key.split('_')
+                    start, end = int(parts[-2]), int(parts[-1])
+                    fc1_indices_to_mask.extend(range(start, end))
                 
-                # Apply pruning based on importance scores
-                for mask_name, importance in masks.items():
-                    if name in mask_name and importance == 0.0:
-                        if 'fc1' in mask_name:
-                            # Prune random subset of fc1 neurons
-                            prune_indices = np.random.choice(
-                                module.fc1.out_features, 
-                                size=int(module.fc1.out_features * 0.3), 
-                                replace=False
-                            )
-                            mask1[0, 0, prune_indices] = 0.0
-                        elif 'fc2' in mask_name:
-                            # Prune random subset of fc2 neurons
-                            prune_indices = np.random.choice(
-                                module.fc2.out_features, 
-                                size=int(module.fc2.out_features * 0.3), 
-                                replace=False
-                            )
-                            mask2[0, 0, prune_indices] = 0.0
+                elif f"block_{block_idx}_fc2_" in key and value == 0.0:
+                    parts = key.split('_')
+                    start, end = int(parts[-2]), int(parts[-1])
+                    fc2_indices_to_mask.extend(range(start, end))
+            
+            if fc1_indices_to_mask:
+                hook = block.mlp.fc1.register_forward_hook(
+                    create_mlp_mask_hook(fc1_indices_to_mask, 'fc1')
+                )
+                hooks.append(hook)
+            
+            if fc2_indices_to_mask:
+                hook = block.mlp.fc2.register_forward_hook(
+                    create_mlp_mask_hook(fc2_indices_to_mask, 'fc2')
+                )
+                hooks.append(hook)
+        
+        # Handle cls_token and pos_embed with hooks
+        if 'cls_token' in masks and masks['cls_token'] == 0.0:
+            # Zero out cls token contribution
+            original_forward = model.forward
+            def forward_no_cls(x):
+                # Temporarily set cls_token to zero
+                original_cls = model.cls_token.data.clone()
+                model.cls_token.data.zero_()
+                output = original_forward(x)
+                model.cls_token.data = original_cls
+                return output
+            model.forward = forward_no_cls
+        
+        return hooks
+    
+    def apply_acdc_optimization(self, num_batches=20):
+        """Apply ACDC algorithm with component-level granularity"""
+        # Compute reference outputs
+        print("Computing reference outputs...")
+        self.compute_reference_outputs(num_batches)
+        
+        # Get components to test
+        components = self.get_component_edges()
+        print(f"Testing {len(components)} components...")
+        
+        # Iterate through components
+        removed_components = []
+        current_masks = {}
+        
+        # Use a single model instance with hooks
+        test_model = copy.deepcopy(self.model)
+        test_model.eval()
+        
+        for comp in tqdm(components, desc="Processing components"):
+            # Test removing this component
+            test_masks = current_masks.copy()
+            test_masks.update(self.create_masked_model([comp]))
+            
+            # Apply masks using hooks
+            hooks = self.apply_masks_to_model(test_model, test_masks)
+            
+            # Compute KL divergence
+            kl_div = self.compute_kl_divergence_batch(test_model)
+            
+            # Remove hooks
+            for hook in hooks:
+                hook.remove()
+            
+            # Check if KL divergence is below threshold
+            if kl_div < self.threshold:
+                # Permanently remove component
+                current_masks = test_masks
+                removed_components.append(comp)
+                print(f"Removed {comp['name']}, KL divergence: {kl_div:.6f}")
+        
+        print(f"Removed {len(removed_components)} components out of {len(components)}")
+        
+        # Create final model with permanent modifications
+        final_model = self.create_final_model(removed_components)
+        
+        return final_model, removed_components
+    
+   
+    def create_final_model(self, removed_components):
+        """Create final model with architectural changes for speed"""
+        final_model = copy.deepcopy(self.model)
+        
+        # Group removed components by block and type
+        blocks_to_remove = set()
+        heads_by_block = {}
+        mlp_fc1_by_block = {}
+        mlp_fc2_by_block = {}
+        remove_cls_token = False
+        remove_pos_embed = False
+        
+        for comp in removed_components:
+            if comp['type'] == 'block':
+                blocks_to_remove.add(comp['block_idx'])
+            elif comp['type'] == 'attention_head':
+                block_idx = comp['block_idx']
+                if block_idx not in heads_by_block:
+                    heads_by_block[block_idx] = []
+                heads_by_block[block_idx].append(comp['head_idx'])
+            elif comp['type'] == 'mlp_fc1_chunk':
+                block_idx = comp['block_idx']
+                if block_idx not in mlp_fc1_by_block:
+                    mlp_fc1_by_block[block_idx] = []
+                mlp_fc1_by_block[block_idx].extend(range(comp['start'], comp['end']))
+            elif comp['type'] == 'mlp_fc2_chunk':
+                block_idx = comp['block_idx']
+                if block_idx not in mlp_fc2_by_block:
+                    mlp_fc2_by_block[block_idx] = []
+                mlp_fc2_by_block[block_idx].extend(range(comp['start'], comp['end']))
+            elif comp['type'] == 'cls_token':
+                remove_cls_token = True
+            elif comp['type'] == 'pos_embed':
+                remove_pos_embed = True
+        
+        # Replace entire blocks with Identity
+        for block_idx in blocks_to_remove:
+            final_model.blocks[block_idx] = nn.Identity()
+        
+        # Process remaining blocks
+        for block_idx in range(len(final_model.blocks)):
+            if block_idx in blocks_to_remove:
+                continue  # Already handled
+            
+            block = final_model.blocks[block_idx]
+            
+            # Replace attention modules with pruned versions
+            if block_idx in heads_by_block:
+                removed_heads = heads_by_block[block_idx]
+                active_heads = [h for h in range(self.model.blocks[0].attn.num_heads) 
+                            if h not in removed_heads]
+                if active_heads:  # Only if some heads remain
+                    old_attn = block.attn
+                    block.attn = PrunedMultiHeadAttention(old_attn, active_heads)
+                else:
+                    # All heads removed - replace with zero output
+                    class ZeroAttention(nn.Module):
+                        def forward(self, x):
+                            return torch.zeros_like(x)
+                    block.attn = ZeroAttention()
+            
+            # Replace MLP modules with pruned versions
+            mlp_modified = False
+            fc1_removed = mlp_fc1_by_block.get(block_idx, [])
+            fc2_removed = mlp_fc2_by_block.get(block_idx, [])
+            
+            if fc1_removed or fc2_removed:
+                old_mlp = block.mlp
+                mlp_dim = old_mlp.fc1.out_features
+                embed_dim = old_mlp.fc1.in_features
                 
-                module.set_edge_masks(mask1, mask2)
+                # Determine active neurons
+                fc1_active = [i for i in range(mlp_dim) if i not in fc1_removed]
+                fc2_active = [i for i in range(embed_dim) if i not in fc2_removed]
+                
+                if fc1_active and fc2_active:  # Some neurons remain
+                    block.mlp = PrunedMLP(old_mlp, fc1_active, fc2_active)
+                else:
+                    # No active neurons - replace with zero output
+                    class ZeroMLP(nn.Module):
+                        def forward(self, x):
+                            return torch.zeros_like(x)
+                    block.mlp = ZeroMLP()
         
-        return optimized_model
+        # Handle cls_token removal
+        if remove_cls_token:
+            # Replace forward to skip cls_token
+            original_forward = final_model.forward
+            def forward_no_cls(x):
+                B = x.shape[0]
+                x = final_model.patch_embed(x)
+                # Skip cls_token concatenation
+                x = x + final_model.pos_embed[:, 1:]  # Only use position embeddings for patches
+                x = final_model.dropout(x)
+                
+                for block in final_model.blocks:
+                    x = block(x)
+                
+                x = final_model.norm(x)
+                # Use mean of all patches instead of cls token
+                x = x.mean(dim=1)
+                x = final_model.head(x)
+                return x
+            
+            final_model.forward = forward_no_cls.__get__(final_model, type(final_model))
+        
+        # Handle pos_embed removal (rare but possible)
+        if remove_pos_embed:
+            with torch.no_grad():
+                final_model.pos_embed.zero_()
+        
+        return final_model
 
-
-def finetune_model(model, train_loader, val_loader, epochs, device):
-    """Fine-tune the optimized model"""
-    criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
-    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE * 0.1, weight_decay=WEIGHT_DECAY)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, epochs)
-    
-    best_val_acc = 0
-    history = {'loss': [], 'train_acc': [], 'val_acc': []}
-    
-    for epoch in range(epochs):
-        # Train
-        train_loss, train_acc = train_epoch(
-            model, train_loader, criterion, optimizer, epoch, device
-        )
-        history['loss'].append(train_loss)
-        history['train_acc'].append(train_acc)
-        
-        # Validate
-        val_acc = evaluate(model, val_loader, device)
-        history['val_acc'].append(val_acc)
-        
-        scheduler.step()
-        
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
-    
-    return model, history, best_val_acc
 
 
 def optimize_model(args):
@@ -203,56 +450,41 @@ def optimize_model(args):
     print(f"\nApplying ACDC optimization with threshold={args.threshold}...")
     acdc = ACDCOptimizer(model, train_loader, threshold=args.threshold, device=DEVICE)
     
-    # Analyze edge importance
-    importance_scores = acdc.analyze_edges(num_batches=args.analysis_batches)
+    # Run ACDC algorithm (replaces analyze_edges, create_edge_masks, and apply_masks)
+    optimized_model, removed_components = acdc.apply_acdc_optimization(
+        num_batches=args.analysis_batches
+    )
     
-    # Create and apply masks
-    edge_masks = acdc.create_edge_masks(importance_scores)
-    optimized_model = acdc.apply_masks(edge_masks)
-    
-    print(f"\nOriginal parameters: {count_parameters(model):,}")
-    print(f"Optimized parameters: {count_parameters(optimized_model):,}")
-    
-    # Fine-tune optimized model
-    if args.finetune_epochs > 0:
-        print(f"\nFine-tuning optimized model for {args.finetune_epochs} epochs...")
-        optimized_model, history, best_acc = finetune_model(
-            optimized_model, train_loader, val_loader, args.finetune_epochs, DEVICE
-        )
-        print(f"Fine-tuning completed. Best validation accuracy: {best_acc:.2f}%")
+    print(f"\nOriginal parameters: {count_effective_parameters(model):,}")
+    print(f"Optimized parameters: {count_effective_parameters(optimized_model):,}")
     
     # Save optimized model
     save_path = f"{OPTIMIZED_MODEL_PREFIX}threshold_{args.threshold}.pth"
     torch.save({
         'model_state_dict': optimized_model.state_dict(),
         'threshold': args.threshold,
-        'edge_masks': edge_masks,
-        'importance_scores': importance_scores,
+        'removed_components': removed_components,
         'config': config,
         'baseline_acc': checkpoint['val_acc'],
-        'optimized_acc': best_acc if args.finetune_epochs > 0 else None
     }, save_path)
     
     print(f"\nOptimized model saved to: {save_path}")
     
-    return optimized_model, importance_scores
+    return optimized_model, removed_components
 
 
 def main():
     parser = argparse.ArgumentParser(description='ACDC optimization for Vision Transformer')
     parser.add_argument('--model-path', type=str, default=BASELINE_MODEL_PATH,
                         help='Path to baseline model checkpoint')
-    parser.add_argument('--threshold', type=float, default=EDGE_THRESHOLD,
-                        help='Edge importance threshold for pruning')
+    parser.add_argument('--threshold', type=float, default=ACDC_THRESHOLD,
+                        help='KL divergence threshold for component removal')
     parser.add_argument('--analysis-batches', type=int, default=ACDC_ANALYSIS_BATCHES,
-                        help='Number of batches for edge importance analysis')
-    parser.add_argument('--finetune-epochs', type=int, default=ACDC_FINETUNE_EPOCHS,
-                        help='Number of epochs for fine-tuning (0 to skip)')
-    
+                        help='Number of batches for KL divergence computation')
     args = parser.parse_args()
     
     # Optimize model
-    optimized_model, importance_scores = optimize_model(args)
+    optimized_model, removed_components = optimize_model(args)
     
     print("\nACDC optimization completed!")
 

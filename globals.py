@@ -28,17 +28,16 @@ LABEL_SMOOTHING = 0.1   # Label smoothing on loss function
 GRAD_CLIP = 1.0
 
 # ACDC optimization parameters
-EDGE_THRESHOLD = 0.01  # Threshold for edge importance in ACDC
+ACDC_THRESHOLD = 0.01  # Threshold for edge importance in ACDC
 ACDC_ANALYSIS_BATCHES = 30  # Number of batches for edge importance analysis
-ACDC_FINETUNE_EPOCHS = 20   # Epochs for fine-tuning after ACDC optimization
 
 # Evaluation parameters
 EVAL_NUM_BATCHES = 50  # Number of batches for inference time measurement
 WARMUP_ITERATIONS = 5  # Skip first few iterations for warm-up
 
 # File paths
-BASELINE_MODEL_PATH = 'baseline_vit.pth'
-OPTIMIZED_MODEL_PREFIX = 'optimized_vit_'  # Will append threshold value
+BASELINE_MODEL_PATH = './models/baseline_vit.pth'
+OPTIMIZED_MODEL_PREFIX = './optimized_models/optimized_vit_'  # Will append threshold value
 
 # Visualization
 PLOT_SAVE_PATH = 'vit_results.png'

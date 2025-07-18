@@ -1,2 +1,5 @@
 tiny-imagenet-200
 __pycache__
+models
+optimzed_models
+evaluation_results

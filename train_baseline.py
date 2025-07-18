@@ -7,7 +7,8 @@ import argparse
 
 from globals import *
 from models import VisionTransformer
-from utils import set_seed, count_parameters, create_tiny_imagenet_datasets, collate_fn
+from data import create_tiny_imagenet_datasets, collate_fn
+from utils import set_seed, count_effective_parameters
 
 
 def train_epoch(model, dataloader, criterion, optimizer, epoch, device):
@@ -109,7 +110,6 @@ def train_baseline_model(args):
     # Create model
     print("\nCreating baseline ViT model...")
     model = VisionTransformer(
-        image_size=IMAGE_SIZE,
         patch_size=PATCH_SIZE,
         num_classes=NUM_CLASSES,
         embed_dim=EMBED_DIM,
@@ -119,7 +119,7 @@ def train_baseline_model(args):
         dropout=DROPOUT
     ).to(DEVICE)
     
-    print(f"Model parameters: {count_parameters(model):,}")
+    print(f"Model parameters: {count_effective_parameters(model):,}")
     
     # Setup training
     criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
