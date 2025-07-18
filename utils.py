@@ -1,11 +1,20 @@
 import torch
 import numpy as np
 import os
-from torchvision import transforms, datasets
-from torch.utils.data import Dataset
+from torchvision import transforms
+from torch.utils.data import Dataset, default_collate
+from torchvision.transforms import v2
 from PIL import Image
 from collections import defaultdict
 import time
+from globals import IMAGE_SIZE, NUM_CLASSES
+
+cutmix = v2.CutMix(num_classes=NUM_CLASSES)
+mixup = v2.MixUp(num_classes=NUM_CLASSES)
+cutmix_or_mixup = v2.RandomChoice([cutmix, mixup])
+
+def collate_fn(batch):
+    return cutmix_or_mixup(*default_collate(batch))
 
 def set_seed(seed = 25):
     """Set random seeds for reproducibility"""
@@ -87,12 +96,13 @@ class TinyImageNetDataset(Dataset):
 def create_tiny_imagenet_datasets(data_path, normalize_mean, normalize_std):
     """Create Tiny-ImageNet train and validation datasets"""
     
-    # Enhanced data augmentation for training
+    # Data augmentation for training
     transform_train = transforms.Compose([
-        transforms.RandomCrop(64, padding=8),
+        transforms.RandomResizedCrop(IMAGE_SIZE, scale=(0.8, 1.0)),
         transforms.RandomHorizontalFlip(),
         transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1),
         transforms.RandomRotation(15),
+        transforms.RandomGrayscale(p=0.2),
         transforms.ToTensor(),
         transforms.Normalize(mean=normalize_mean, std=normalize_std),
         transforms.RandomErasing(p=0.5, scale=(0.02, 0.33), ratio=(0.3, 3.3))

@@ -7,7 +7,7 @@ import argparse
 
 from globals import *
 from models import VisionTransformer
-from utils import set_seed, count_parameters, create_tiny_imagenet_datasets
+from utils import set_seed, count_parameters, create_tiny_imagenet_datasets, collate_fn
 
 
 def train_epoch(model, dataloader, criterion, optimizer, epoch, device):
@@ -19,25 +19,42 @@ def train_epoch(model, dataloader, criterion, optimizer, epoch, device):
     
     pbar = tqdm(dataloader, desc=f'Epoch {epoch+1}')
     for images, labels in pbar:
-        images, labels = images.to(device), labels.to(device)
-        
-        optimizer.zero_grad()
-        outputs = model(images)
-        loss = criterion(outputs, labels)
-        loss.backward()
-        optimizer.step()
-        
-        running_loss += loss.item()
-        _, predicted = outputs.max(1)
-        total += labels.size(0)
-        correct += predicted.eq(labels).sum().item()
-        
-        pbar.set_postfix({
-            'loss': running_loss / (pbar.n + 1),
-            'acc': 100. * correct / total
-        })
-    
-    return running_loss / len(dataloader), 100. * correct / total
+            images = images.to(device)
+            labels = labels.to(device)
+
+            optimizer.zero_grad()
+            outputs = model(images)  # (N, C)
+
+            # Soft‐label branch (MixUp / CutMix)
+            if labels.dim() == 2:
+                log_probs = nn.functional.log_softmax(outputs, dim=1)
+                loss = -(labels * log_probs).sum(dim=1).mean()
+
+                # Accuracy
+                _, preds = outputs.max(1)
+                hard_labels = labels.argmax(dim=1)
+                correct += preds.eq(hard_labels).sum().item()
+                total += images.size(0)
+
+            # Hard‐label branch (normal)
+            else:
+                loss = criterion(outputs, labels)
+                _, preds = outputs.max(1)
+                correct += preds.eq(labels).sum().item()
+                total += labels.size(0)
+
+            loss.backward()
+            optimizer.step()
+
+            running_loss += loss.item()
+            pbar.set_postfix({
+                'loss': running_loss / (pbar.n + 1),
+                'acc' : 100. * correct / total
+            })
+
+    avg_loss = running_loss / len(dataloader)
+    avg_acc  = 100. * correct / total
+    return avg_loss, avg_acc
 
 
 def evaluate(model, dataloader, device):
@@ -76,14 +93,17 @@ def train_baseline_model(args):
         batch_size=BATCH_SIZE, 
         shuffle=True, 
         num_workers=NUM_WORKERS, 
-        pin_memory=True
+        pin_memory=True,
+        drop_last=True,
+        collate_fn=collate_fn
     )
     val_loader = DataLoader(
         val_dataset, 
         batch_size=BATCH_SIZE, 
         shuffle=False, 
         num_workers=NUM_WORKERS, 
-        pin_memory=True
+        pin_memory=True,
+        drop_last=True
     )
     
     # Create model
@@ -102,7 +122,7 @@ def train_baseline_model(args):
     print(f"Model parameters: {count_parameters(model):,}")
     
     # Setup training
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, args.epochs)
     

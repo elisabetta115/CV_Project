@@ -11,11 +11,12 @@ IMAGE_SIZE = 64    # Tiny-ImageNet images are 64x64
 # Model architecture parameters
 PATCH_SIZE = 8
 NUM_PATCHES = (IMAGE_SIZE // PATCH_SIZE) ** 2
-EMBED_DIM = 384
+HEAD_DIM = 96
 NUM_HEADS = 6
+EMBED_DIM = HEAD_DIM * NUM_HEADS
 NUM_LAYERS = 6
 MLP_DIM = 1536
-DROPOUT = 0.1
+DROPOUT = 0.2
 
 # Training parameters
 BATCH_SIZE = 64
@@ -23,6 +24,8 @@ LEARNING_RATE = 1e-4
 NUM_EPOCHS = 50
 WEIGHT_DECAY = 0.01
 NUM_WORKERS = 4
+LABEL_SMOOTHING = 0.1   # Label smoothing on loss function
+GRAD_CLIP = 1.0
 
 # ACDC optimization parameters
 EDGE_THRESHOLD = 0.01  # Threshold for edge importance in ACDC

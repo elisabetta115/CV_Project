@@ -10,7 +10,7 @@ import argparse
 from globals import *
 from models import VisionTransformer, MultiHeadAttention, MLP
 from utils import set_seed, count_parameters, create_tiny_imagenet_datasets, EdgeImportanceTracker
-from train_baseline import train_epoch, evaluate
+from train_baseline import train_epoch, evaluate, collate_fn
 
 
 class ACDCOptimizer:
@@ -124,7 +124,7 @@ class ACDCOptimizer:
 
 def finetune_model(model, train_loader, val_loader, epochs, device):
     """Fine-tune the optimized model"""
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE * 0.1, weight_decay=WEIGHT_DECAY)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, epochs)
     
@@ -186,14 +186,17 @@ def optimize_model(args):
         batch_size=BATCH_SIZE, 
         shuffle=True, 
         num_workers=NUM_WORKERS, 
-        pin_memory=True
+        pin_memory=True,
+        drop_last=True,
+        collate_fn=collate_fn
     )
     val_loader = DataLoader(
         val_dataset, 
         batch_size=BATCH_SIZE, 
         shuffle=False, 
         num_workers=NUM_WORKERS, 
-        pin_memory=True
+        pin_memory=True,
+        drop_last=True
     )
     
     # Apply ACDC optimization
