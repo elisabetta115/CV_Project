@@ -283,10 +283,24 @@ class ModelEvaluator:
         pareto_points = self.compute_pareto_frontier(metrics_list, 'inference_time', 'accuracy')
         
         # Plot all points
+        pareto_names = { name for x, y, name in pareto_points }
         for i, m in enumerate(metrics_list):
-            ax.scatter(m['inference_time']*1000, m['accuracy'], s=100, c=[colors[i]], 
-                      alpha=0.7, label=m['model_name'], edgecolors='black', linewidth=1)
-        
+            name = m['model_name']
+            is_opt = name in pareto_names
+            
+            ax.scatter(
+                m['inference_time'] * 1000,
+                m['accuracy'],
+                s=200 if is_opt else 100,                # Bigger star vs normal dot
+                c=[colors[i]],                           # Same color in both cases
+                alpha=.9,
+                marker='*' if is_opt else 'o',           # Star vs circle
+                edgecolors='black',
+                linewidth=1 if is_opt else 1,            # Thicker outline for stars
+                label=name,
+                zorder=5 if is_opt else 3                # Draw stars on top
+            )
+
         # Highlight Pareto frontier
         if pareto_points:
             pareto_x = [p[0]*1000 for p in pareto_points]
@@ -294,16 +308,10 @@ class ModelEvaluator:
             ax.plot(pareto_x,
                     pareto_y,
                     linestyle='--',
-                    marker='o',
                     color='red',
                     linewidth=2,
-                    markersize=8,
                     label='Pareto Frontier')
             
-            # Mark Pareto optimal points
-            for x, y, name in pareto_points:
-                ax.scatter(x*1000, y, s=200, marker='*', c='red', edgecolors='black', linewidth=2)
-        
         ax.set_xlabel('Inference Time (ms/batch)')
         ax.set_ylabel('Top-1 Accuracy (%)')
         ax.set_title('Pareto Frontier: Accuracy vs Speed Trade-off')
