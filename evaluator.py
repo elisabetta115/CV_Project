@@ -10,7 +10,7 @@ import json
 from sklearn.metrics import precision_recall_fscore_support
 
 from globals import *
-from models import VisionTransformer, reconstruct_pruned_model, PrunedMultiHeadAttention, PrunedMLP
+from models import VisionTransformer, reconstruct_pruned_model
 
 from data import create_tiny_imagenet_datasets
 from utils import set_seed, count_effective_parameters, measure_inference_time
@@ -455,9 +455,9 @@ def load_model_from_checkpoint(checkpoint_path):
     """Load model from checkpoint, handling both baseline and optimized models"""
     checkpoint = torch.load(checkpoint_path, map_location=DEVICE)
     config = checkpoint['config']
-    
+
     # Build the base ViT on the device
-    model = VisionTransformer(
+    base_model = VisionTransformer(
         image_size=config['image_size'],
         patch_size=config['patch_size'],
         num_classes=config['num_classes'],
@@ -470,12 +470,28 @@ def load_model_from_checkpoint(checkpoint_path):
 
     # If this checkpoint is a pruned model, first reconstruct the pruned net
     if 'removed_components' in checkpoint:
-        print("Loading optimized model – reconstructing pruned architecture...")
-        model = reconstruct_pruned_model(model, checkpoint['removed_components'], config)
-        model.to(DEVICE)
+        print("Loading optimized model – reconstructing pruned architecture…")
+        model = reconstruct_pruned_model(
+            base_model,
+            checkpoint['removed_components'],
+            config
+        ).to(DEVICE)
+    else:
+        model = base_model
 
-    # Now load the matching weights (pruned or full) into whichever arch we have
-    model.load_state_dict(checkpoint['model_state_dict'])
+    # Load weights with strict=False so pruned parameters are ignored
+    missing_keys, unexpected_keys = model.load_state_dict(
+        checkpoint['model_state_dict'],
+        strict=False
+    )
+    if missing_keys:
+        print(f"Ignoring {len(missing_keys)} missing keys (pruned):")
+        for k in missing_keys:
+            print("  ", k)
+    if unexpected_keys:
+        print(f"Ignoring {len(unexpected_keys)} unexpected keys:")
+        for k in unexpected_keys:
+            print("  ", k)
 
     return model, checkpoint
 
@@ -530,6 +546,9 @@ def main():
                 if 'threshold' in path:
                     threshold = path.split('threshold_')[1].split('.pth')[0]
                     name = f'ACDC_t{threshold}'
+                elif 'keep' in path:
+                    threshold = path.split('keep_')[1].split('.pth')[0]
+                    name = f'EAP_k{threshold}'
                 else:
                     name = os.path.basename(path).replace('.pth', '')
                 all_model_paths.append((name, path))
@@ -537,8 +556,12 @@ def main():
         # If no paths specified, find all optimized models
         optimized_models = glob.glob(f"{OPTIMIZED_MODEL_PREFIX}*.pth")
         for path in optimized_models:
-            threshold = path.split('threshold_')[1].split('.pth')[0]
-            name = f'ACDC_t{threshold}'
+            if 'threshold' in path:
+                threshold = path.split('threshold_')[1].split('.pth')[0]
+                name = f'ACDC_t{threshold}'
+            elif 'keep' in path:
+                threshold = path.split('keep_')[1].split('.pth')[0]
+                name = f'EAP_k{threshold}'
             all_model_paths.append((name, path))
     
     # Evaluate all models

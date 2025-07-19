@@ -135,7 +135,7 @@ class MLP(nn.Module):
         return x
     
 class PrunedMLP(nn.Module):
-    """MLP module with actual neuron pruning - fixed to not add parameters"""
+    """MLP module with neuron pruning"""
     def __init__(self, original_mlp, fc1_active_neurons=None, fc2_active_neurons=None):
         super().__init__()
         
@@ -173,7 +173,7 @@ class PrunedMLP(nn.Module):
             if self.fc2.bias is not None:
                 self.fc2.bias.data.zero_()
             
-            # Cpy weights for active connections only
+            # Copy weights for active connections only
             for new_in_idx, old_in_idx in enumerate(fc1_active_neurons):
                 # Copy weights for active FC2 output neurons
                 for out_idx in fc2_active_neurons:
@@ -210,7 +210,7 @@ class TransformerBlock(nn.Module):
 
 
 class VisionTransformer(nn.Module):
-    """Vision Transformer with ACDC optimization support"""
+    """Vision Transformer with optimization support"""
     def __init__(self, image_size=64, patch_size=8, num_classes=200, embed_dim=384, 
                  num_heads=6, num_layers=6, mlp_dim=1536, dropout=0.1):
         super().__init__()

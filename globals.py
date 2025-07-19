@@ -9,12 +9,12 @@ NUM_CLASSES = 200  # Tiny-ImageNet has 200 classes
 IMAGE_SIZE = 64    # Tiny-ImageNet images are 64x64
 
 # Model architecture parameters
-PATCH_SIZE = 8
+PATCH_SIZE = 16
 NUM_PATCHES = (IMAGE_SIZE // PATCH_SIZE) ** 2
-HEAD_DIM = 96
+HEAD_DIM = 64
 NUM_HEADS = 6
 EMBED_DIM = HEAD_DIM * NUM_HEADS
-NUM_LAYERS = 6
+NUM_LAYERS = 12
 MLP_DIM = 1536
 DROPOUT = 0.2
 
@@ -31,13 +31,17 @@ GRAD_CLIP = 1.0
 ACDC_THRESHOLD = 0.01  # Threshold for edge importance in ACDC
 ACDC_ANALYSIS_BATCHES = 30  # Number of batches for edge importance analysis
 
+# Attribution Patching optimization parameter
+KEEP_RATIO = 0.9 # Fraction of components to keep (by attribution score)
+EAP_ANALYSIS_BATCHES = 20 # Number of batches for edge importance analysis
+
 # Evaluation parameters
 EVAL_NUM_BATCHES = 50  # Number of batches for inference time measurement
 WARMUP_ITERATIONS = 5  # Skip first few iterations for warm-up
 
 # File paths
-BASELINE_MODEL_PATH = './models/baseline_vit.pth'
-OPTIMIZED_MODEL_PREFIX = './optimized_models/optimized_vit_'  # Will append threshold value
+BASELINE_MODEL_PATH = './models/baseline_paper_vit.pth'
+OPTIMIZED_MODEL_PREFIX = './optimized_models/'  # Will append threshold value
 
 # Visualization
 PLOT_SAVE_PATH = 'vit_results.png'
