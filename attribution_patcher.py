@@ -5,6 +5,7 @@ from tqdm import tqdm
 import copy
 import argparse
 import numpy as np
+import os
 
 from globals import *
 from models import VisionTransformer
