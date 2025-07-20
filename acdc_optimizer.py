@@ -459,7 +459,7 @@ def optimize_model(args):
     print(f"Optimized parameters: {count_effective_parameters(optimized_model):,}")
     
     # Save optimized model
-    save_path = f"{OPTIMIZED_MODEL_PREFIX}optimized_large_vit_{args.threshold}.pth"
+    save_path = f"{OPTIMIZED_MODEL_PREFIX}optimized_vit_threshold{args.threshold}.pth"
     torch.save({
         'model_state_dict': optimized_model.state_dict(),
         'threshold': args.threshold,

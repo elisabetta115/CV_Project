@@ -329,8 +329,6 @@ def optimize_model_with_attribution(args):
     
     # Save optimized model
     save_path = f"{OPTIMIZED_MODEL_PREFIX}attribution_patched_model_keep_{args.keep_ratio}.pth"
-
-    save_path = f"attribution_patched_model_keep_{args.keep_ratio}.pth"
     torch.save({
         'model_state_dict': optimized_model.state_dict(),
         'keep_ratio': args.keep_ratio,

@@ -260,6 +260,15 @@ class ModelEvaluator:
         ax.set_xticklabels(model_names, rotation=45, ha='right')
         ax.grid(axis='y', alpha=0.3)
         
+        # Set y-axis limits with 10% padding to show differences better
+        inf_min, inf_max = min(inference_times), max(inference_times)
+        inf_range = inf_max - inf_min
+        ax.set_ylim(inf_min - 0.1*inf_range, inf_max + 0.1*inf_range)
+        
+        thr_min, thr_max = min(throughput), max(throughput)
+        thr_range = thr_max - thr_min
+        ax2.set_ylim(thr_min - 0.1*thr_range, thr_max + 0.1*thr_range)
+        
         # Model complexity
         ax = axes[0, 2]
         params = [m['parameters']/1e6 for m in metrics_list]
@@ -278,43 +287,69 @@ class ModelEvaluator:
         ax.set_xticklabels(model_names, rotation=45, ha='right')
         ax.grid(axis='y', alpha=0.3)
         
-        # Pareto frontier: Accuracy vs Inference Time
-        ax = axes[1, 0]
-        pareto_points = self.compute_pareto_frontier(metrics_list, 'inference_time', 'accuracy')
+        # Set y-axis limits with padding
+        param_min, param_max = min(params), max(params)
+        param_range = param_max - param_min
+        ax.set_ylim(param_min - 0.1*param_range, param_max + 0.1*param_range)
         
-        # Plot all points
-        pareto_names = { name for x, y, name in pareto_points }
+        gflop_min, gflop_max = min(gflops), max(gflops)
+        gflop_range = gflop_max - gflop_min
+        ax2.set_ylim(gflop_min - 0.1*gflop_range, gflop_max + 0.1*gflop_range)
+        
+        # Pareto frontier: Error vs Inference Time (both to minimize)
+        ax = axes[1, 0]
+        
+        # Convert accuracy to error rate for proper Pareto orientation
+        error_rates = [100 - m['accuracy'] for m in metrics_list]
+        
+        # Compute Pareto frontier for error (minimize) vs inference time (minimize)
+        points = [(m['inference_time']*1000, 100-m['accuracy'], m['model_name']) 
+                for m in metrics_list]
+        
+        # Find Pareto optimal points (both objectives to minimize)
+        pareto_points = []
+        sorted_points = sorted(points, key=lambda p: p[0])  # Sort by inference time
+        
+        current_min_error = float('inf')
+        for point in sorted_points:
+            inf_time, error, name = point
+            if error < current_min_error:
+                pareto_points.append(point)
+                current_min_error = error
+        
+        # Plot all points with error on x-axis, inference time on y-axis
+        pareto_names = {name for x, y, name in pareto_points}
         for i, m in enumerate(metrics_list):
             name = m['model_name']
             is_opt = name in pareto_names
+            error = 100 - m['accuracy']
             
             ax.scatter(
-                m['inference_time'] * 1000,
-                m['accuracy'],
-                s=200 if is_opt else 100,                # Bigger star vs normal dot
-                c=[colors[i]],                           # Same color in both cases
+                error,  # Error on x-axis
+                m['inference_time'] * 1000,  # Inference time on y-axis
+                s=200 if is_opt else 100,
+                c=[colors[i]],
                 alpha=.9,
-                marker='*' if is_opt else 'o',           # Star vs circle
+                marker='*' if is_opt else 'o',
                 edgecolors='black',
-                linewidth=1 if is_opt else 1,            # Thicker outline for stars
+                linewidth=2 if is_opt else 1,
                 label=name,
-                zorder=5 if is_opt else 3                # Draw stars on top
+                zorder=5 if is_opt else 3
             )
-
-        # Highlight Pareto frontier
+        
+        # Plot Pareto frontier
         if pareto_points:
-            pareto_x = [p[0]*1000 for p in pareto_points]
-            pareto_y = [p[1] for p in pareto_points]
-            ax.plot(pareto_x,
-                    pareto_y,
+            pareto_x = [p[1] for p in pareto_points]  # errors
+            pareto_y = [p[0] for p in pareto_points]  # inference times
+            ax.plot(pareto_x, pareto_y,
                     linestyle='--',
                     color='red',
                     linewidth=2,
                     label='Pareto Frontier')
-            
-        ax.set_xlabel('Inference Time (ms/batch)')
-        ax.set_ylabel('Top-1 Accuracy (%)')
-        ax.set_title('Pareto Frontier: Accuracy vs Speed Trade-off')
+        
+        ax.set_xlabel('Error Rate (%)')
+        ax.set_ylabel('Inference Time (ms/batch)')
+        ax.set_title('Pareto Frontier: Error vs Speed Trade-off')
         ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
         ax.grid(True, alpha=0.3)
         
@@ -352,11 +387,16 @@ class ModelEvaluator:
         ax.set_xticklabels(model_names, rotation=45, ha='right')
         ax.grid(axis='y', alpha=0.3)
         
+        # Set y-axis limits with padding to show differences
+        eff_min, eff_max = min(normalized_efficiency), max(normalized_efficiency)
+        eff_range = eff_max - eff_min
+        ax.set_ylim(eff_min - 0.1*eff_range, eff_max + 0.1*eff_range)
+        
         # Add value labels
         for bar, eff in zip(bars, normalized_efficiency):
             height = bar.get_height()
             ax.text(bar.get_x() + bar.get_width()/2., height,
-                   f'{eff:.1f}%', ha='center', va='bottom')
+                f'{eff:.1f}%', ha='center', va='bottom')
         
         plt.tight_layout()
         plt.savefig(save_path, dpi=300, bbox_inches='tight')

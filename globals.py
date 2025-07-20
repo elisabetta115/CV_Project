@@ -9,14 +9,14 @@ NUM_CLASSES = 200  # Tiny-ImageNet has 200 classes
 IMAGE_SIZE = 64    # Tiny-ImageNet images are 64x64
 
 # Model architecture parameters
-PATCH_SIZE = 16
+PATCH_SIZE = 8
 NUM_PATCHES = (IMAGE_SIZE // PATCH_SIZE) ** 2
-HEAD_DIM = 64
+HEAD_DIM = 96
 NUM_HEADS = 6
 EMBED_DIM = HEAD_DIM * NUM_HEADS
-NUM_LAYERS = 12
+NUM_LAYERS = 6
 MLP_DIM = 1536
-DROPOUT = 0.2
+DROPOUT = 0.1
 
 # Training parameters
 BATCH_SIZE = 64
@@ -40,7 +40,7 @@ EVAL_NUM_BATCHES = 50  # Number of batches for inference time measurement
 WARMUP_ITERATIONS = 5  # Skip first few iterations for warm-up
 
 # File paths
-BASELINE_MODEL_PATH = './models/baseline_paper_vit.pth'
+BASELINE_MODEL_PATH = './models/baseline_vit.pth'
 OPTIMIZED_MODEL_PREFIX = './optimized_models/'  # Will append threshold value
 
 # Visualization
