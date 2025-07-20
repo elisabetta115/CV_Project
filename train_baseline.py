@@ -200,7 +200,6 @@ def train_baseline_model(args):
     print(f"\nTraining completed. Best validation accuracy: {best_val_acc:.2f}%")
     return model, train_history
 
-
 def main():
     parser = argparse.ArgumentParser(description='Train baseline Vision Transformer')
     parser.add_argument('--epochs', type=int, default=NUM_EPOCHS, 
@@ -212,12 +211,14 @@ def main():
     
     args = parser.parse_args()
     
+    # Ensure the directory exists
+    os.makedirs(os.path.dirname(args.save_path), exist_ok=True)
+    
     # Train model
     model, history = train_baseline_model(args)
     
     print("\nBaseline model training completed!")
     print(f"Model saved to: {args.save_path}")
-
 
 if __name__ == "__main__":
     main()

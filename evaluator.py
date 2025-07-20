@@ -501,10 +501,12 @@ def main():
                         help='Paths to model checkpoints to evaluate')
     parser.add_argument('--baseline', type=str, default=BASELINE_MODEL_PATH,
                         help='Path to baseline model')
-    parser.add_argument('--output-dir', type=str, default='./evaluation_results',
+    parser.add_argument('--output-dir', type=str, default=EVALUATION_RESULTS_DIR,
                         help='Directory to save evaluation results')
     parser.add_argument('--batch-size', type=int, default=BATCH_SIZE,
                         help='Batch size for evaluation')
+    parser.add_argument('--auto-find', action='store_true',
+                        help='Automatically find all models in the optimized models directory')
     
     args = parser.parse_args()
     
@@ -538,50 +540,85 @@ def main():
     if os.path.exists(args.baseline):
         all_model_paths.append(('Baseline', args.baseline))
     
-    # Add other models
+    # Add specified models
     if args.model_paths:
         for path in args.model_paths:
             if os.path.exists(path):
-                # Extract threshold from filename if it's an optimized model
-                if 'threshold' in path:
-                    threshold = path.split('threshold_')[1].split('.pth')[0]
+                # Parse model name from path
+                basename = os.path.basename(path).replace('.pth', '')
+                
+                # Determine model type and name
+                if 'threshold' in basename:
+                    # ACDC model
+                    threshold = basename.split('threshold_')[1]
                     name = f'ACDC_t{threshold}'
-                elif 'keep' in path:
-                    threshold = path.split('keep_')[1].split('.pth')[0]
-                    name = f'EAP_k{threshold}'
+                elif 'keep' in basename:
+                    # EAP model
+                    keep_ratio = basename.split('keep_')[1]
+                    name = f'EAP_k{keep_ratio}'
                 else:
-                    name = os.path.basename(path).replace('.pth', '')
+                    name = basename
+                    
                 all_model_paths.append((name, path))
-    else:
-        # If no paths specified, find all optimized models
-        optimized_models = glob.glob(f"{OPTIMIZED_MODEL_PREFIX}*.pth")
+    
+    # Auto-find models if requested or if no models specified
+    if args.auto_find or (not args.model_paths and not all_model_paths):
+        print("Auto-finding optimized models...")
+        
+        # Find all models in optimized directory
+        optimized_models = glob.glob(os.path.join(OPTIMIZED_MODEL_DIR, "*.pth"))
+        
         for path in optimized_models:
-            if 'threshold' in path:
-                threshold = path.split('threshold_')[1].split('.pth')[0]
+            basename = os.path.basename(path).replace('.pth', '')
+            
+            # Parse ACDC models
+            if ACDC_MODEL_BASE_NAME in basename and 'threshold' in basename:
+                threshold = basename.split('threshold_')[1]
                 name = f'ACDC_t{threshold}'
-            elif 'keep' in path:
-                threshold = path.split('keep_')[1].split('.pth')[0]
-                name = f'EAP_k{threshold}'
-            all_model_paths.append((name, path))
+                all_model_paths.append((name, path))
+            
+            # Parse EAP models
+            elif EAP_MODEL_BASE_NAME in basename and 'keep' in basename:
+                keep_ratio = basename.split('keep_')[1]
+                name = f'EAP_k{keep_ratio}'
+                all_model_paths.append((name, path))
+    
+    if not all_model_paths:
+        print("No models found to evaluate!")
+        return 1
+    
+    print(f"\nFound {len(all_model_paths)} models to evaluate:")
+    for name, path in all_model_paths:
+        print(f"  - {name}: {path}")
     
     # Evaluate all models
     all_metrics = []
     for model_name, model_path in all_model_paths:
         print(f"\nLoading {model_name} from {model_path}...")
-        model, checkpoint = load_model_from_checkpoint(model_path)
         
-        # Evaluate
-        metrics = evaluator.evaluate_model_comprehensive(model, val_loader, model_name)
-        all_metrics.append(metrics)
-        
-        # Print immediate results
-        print(f"Results for {model_name}:")
-        print(f"  - Top-1 Accuracy: {metrics['accuracy']:.2f}%")
-        print(f"  - Top-5 Accuracy: {metrics['top5_accuracy']:.2f}%")
-        print(f"  - F1 Score: {metrics['f1_score']:.2f}%")
-        print(f"  - Inference time: {metrics['inference_time']*1000:.2f}ms")
-        print(f"  - Parameters: {metrics['parameters']/1e6:.2f}M")
-        print(f"  - Efficiency: {metrics['accuracy']/(metrics['inference_time']*1000):.4f} acc/ms")
+        try:
+            model, checkpoint = load_model_from_checkpoint(model_path)
+            
+            # Evaluate
+            metrics = evaluator.evaluate_model_comprehensive(model, val_loader, model_name)
+            all_metrics.append(metrics)
+            
+            # Print immediate results
+            print(f"Results for {model_name}:")
+            print(f"  - Top-1 Accuracy: {metrics['accuracy']:.2f}%")
+            print(f"  - Top-5 Accuracy: {metrics['top5_accuracy']:.2f}%")
+            print(f"  - F1 Score: {metrics['f1_score']:.2f}%")
+            print(f"  - Inference time: {metrics['inference_time']*1000:.2f}ms")
+            print(f"  - Parameters: {metrics['parameters']/1e6:.2f}M")
+            print(f"  - Efficiency: {metrics['accuracy']/(metrics['inference_time']*1000):.4f} acc/ms")
+            
+        except Exception as e:
+            print(f"Error evaluating {model_name}: {e}")
+            continue
+    
+    if not all_metrics:
+        print("No models were successfully evaluated!")
+        return 1
     
     # Plot results and compute Pareto frontier
     plot_path = os.path.join(args.output_dir, 'evaluation_results.png')

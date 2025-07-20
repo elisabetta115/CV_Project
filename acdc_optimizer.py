@@ -459,13 +459,16 @@ def optimize_model(args):
     print(f"Optimized parameters: {count_effective_parameters(optimized_model):,}")
     
     # Save optimized model
-    save_path = f"{OPTIMIZED_MODEL_PREFIX}optimized_large_vit_{args.threshold}.pth"
+    save_filename = f"{args.output_base_name}_threshold_{args.threshold}.pth"
+    save_path = os.path.join(OPTIMIZED_MODEL_DIR, save_filename)
+    
     torch.save({
         'model_state_dict': optimized_model.state_dict(),
         'threshold': args.threshold,
         'removed_components': removed_components,
         'config': config,
         'baseline_acc': checkpoint['val_acc'],
+        'optimization_method': 'acdc',
     }, save_path)
     
     print(f"\nOptimized model saved to: {save_path}")
@@ -481,7 +484,13 @@ def main():
                         help='KL divergence threshold for component removal')
     parser.add_argument('--analysis-batches', type=int, default=ACDC_ANALYSIS_BATCHES,
                         help='Number of batches for KL divergence computation')
+    parser.add_argument('--output-base-name', type=str, default=ACDC_MODEL_BASE_NAME,
+                        help='Base name for output model file')
+    
     args = parser.parse_args()
+    
+    # Ensure output directory exists
+    os.makedirs(OPTIMIZED_MODEL_DIR, exist_ok=True)
     
     # Optimize model
     optimized_model, removed_components = optimize_model(args)

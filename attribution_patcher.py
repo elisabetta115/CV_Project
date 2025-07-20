@@ -327,10 +327,10 @@ def optimize_model_with_attribution(args):
     print(f"Optimized parameters: {count_effective_parameters(optimized_model):,}")
     print(f"Parameter reduction: {(1 - count_effective_parameters(optimized_model)/count_effective_parameters(model))*100:.1f}%")
     
-    # Save optimized model
-    save_path = f"{OPTIMIZED_MODEL_PREFIX}attribution_patched_model_keep_{args.keep_ratio}.pth"
-
-    save_path = f"attribution_patched_model_keep_{args.keep_ratio}.pth"
+     # Save optimized model
+    save_filename = f"{args.output_base_name}_keep_{args.keep_ratio}.pth"
+    save_path = os.path.join(OPTIMIZED_MODEL_DIR, save_filename)
+    
     torch.save({
         'model_state_dict': optimized_model.state_dict(),
         'keep_ratio': args.keep_ratio,
@@ -338,12 +338,12 @@ def optimize_model_with_attribution(args):
         'attribution_scores': attribution_scores,
         'config': config,
         'baseline_acc': checkpoint['val_acc'],
+        'optimization_method': 'eap',
     }, save_path)
     
     print(f"\nOptimized model saved to: {save_path}")
     
-    return optimized_model, components_to_remove
-
+    return optimize
 
 def main():
     parser = argparse.ArgumentParser(description='Attribution Patching for Vision Transformer')
@@ -355,7 +355,13 @@ def main():
                         help='Number of batches for attribution computation')
     parser.add_argument('--use-task-loss', action='store_true',
                         help='Use task-specific loss instead of KL divergence')
+    parser.add_argument('--output-base-name', type=str, default=EAP_MODEL_BASE_NAME,
+                        help='Base name for output model file')
+    
     args = parser.parse_args()
+    
+    # Ensure output directory exists
+    os.makedirs(OPTIMIZED_MODEL_DIR, exist_ok=True)
     
     # Optimize model
     optimized_model, removed_components = optimize_model_with_attribution(args)
