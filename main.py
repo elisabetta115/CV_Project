@@ -106,6 +106,7 @@ def main():
     
     print("="*80)
     print("VISION TRANSFORMER OPTIMIZATION PIPELINE")
+    print("VISION TRANSFORMER OPTIMIZATION PIPELINE")
     print("="*80)
     print(f"Mode: {args.mode}")
     print(f"Method: {args.method}")
@@ -127,7 +128,7 @@ def main():
             print(f"\nSkipping baseline training - model exists at {baseline_model_path}")
         else:
             print("\n" + "="*60)
-            print("STEP 1: Training Baseline Model")
+            print("Training Baseline Model")
             print("="*60)
             
             cmd = f"python train_baseline.py --epochs {args.baseline_epochs} --save-path {baseline_model_path}"
@@ -171,9 +172,9 @@ def main():
                     # Continue with other ratios
     
     # Evaluate all models
-    if args.mode in ['full', 'evaluate']:
+    if args.mode in ['full', 'evaluate', 'both']:
         print("\n" + "="*60)
-        print("STEP 3: Comprehensive Evaluation")
+        print("Comprehensive Evaluation")
         print("="*60)
         
         # Find all models to evaluate
@@ -214,7 +215,7 @@ def main():
     print("="*80)
     
     # Print summary
-    if args.mode == 'full':
+    if args.mode in ['full', 'both']:
         print("\nSummary:")
         print(f"- Baseline model: {baseline_model_path}")
         
@@ -226,10 +227,6 @@ def main():
             
         print(f"- Optimized models: {num_optimized} variants")
         print(f"- Evaluation results: ./evaluation_results/")
-        print("\nNext steps:")
-        print("1. Check evaluation_results/evaluation_results.png for visual comparison")
-        print("2. Review Pareto frontier to select best model for your use case")
-        print("3. Deploy selected model based on your requirements")
     
     return 0
 
