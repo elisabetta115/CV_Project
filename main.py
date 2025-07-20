@@ -10,7 +10,7 @@ def run_command(cmd):
     """Run a command and print output"""
     print(f"\nRunning: {cmd}")
     print("-" * 60)
-    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    result = subprocess.run(cmd, shell=True, capture_output=False, text=True)
     print(result.stdout)
     if result.stderr:
         print("Errors:", result.stderr)
