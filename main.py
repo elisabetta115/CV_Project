@@ -106,7 +106,6 @@ def main():
     
     print("="*80)
     print("VISION TRANSFORMER OPTIMIZATION PIPELINE")
-    print("VISION TRANSFORMER OPTIMIZATION PIPELINE")
     print("="*80)
     print(f"Mode: {args.mode}")
     print(f"Method: {args.method}")
