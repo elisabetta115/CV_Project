@@ -10,7 +10,7 @@ import json
 from sklearn.metrics import precision_recall_fscore_support
 
 from globals import *
-from models import VisionTransformer, reconstruct_pruned_model
+from network import VisionTransformer, reconstruct_pruned_model
 
 from data import create_tiny_imagenet_datasets
 from utils import set_seed, count_effective_parameters, measure_inference_time

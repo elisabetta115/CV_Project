@@ -6,16 +6,16 @@ This repository implements a modular framework for training Vision Transformers 
 
 ```
 .
-├── globals.py              # All configuration parameters and constants
-├── models.py               # Vision Transformer model implementation
-├── data.py                 # Dataset creation and augmentation
-├── utils.py                # Utility functions and helper classes
-├── train_baseline.py       # Script to train the baseline ViT model
-├── acdc_optimizer.py       # ACDC optimization implementation
-├── attribution_patcher.py  # EAP optimization implementation
-├── evaluator.py            # Comprehensive evaluation and Pareto analysis
-├── main.py                 # Main pipeline script
-└── README.md               # This file
+├── globals.py             # All configuration parameters and constants
+├── network.py             # Vision Transformer related classes and functions
+├── data.py                # Dataset creation and augmentation
+├── utils.py               # Utility functions and helper classes
+├── train_baseline.py      # Script to train the baseline ViT model
+├── acdc_optimizer.py      # ACDC optimization implementation
+├── eap_optimizer.py       # EAP optimization implementation
+├── evaluator.py           # Comprehensive evaluation and Pareto analysis
+├── main.py                # Main pipeline script
+└── README.md              # This file
 ```
 
 ## Requirements
@@ -97,7 +97,7 @@ Options:
 Apply EAP optimization to a trained model:
 
 ```bash
-python attribution_patcher.py --keep-ratio 0.9 --model-path ./models/baseline_vit.pth
+python eap_optimizer.py --keep-ratio 0.9 --model-path ./models/baseline_vit.pth
 ```
 
 Options:

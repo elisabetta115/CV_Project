@@ -7,7 +7,7 @@ import argparse
 import os
 
 from globals import *
-from models import VisionTransformer
+from network import VisionTransformer
 from data import create_tiny_imagenet_datasets, collate_fn
 from utils import set_seed, count_effective_parameters
 

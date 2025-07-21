@@ -8,7 +8,7 @@ import numpy as np
 import os
 
 from globals import *
-from models import VisionTransformer
+from network import VisionTransformer
 from data import create_tiny_imagenet_datasets, collate_fn
 from utils import set_seed, count_effective_parameters
 
@@ -249,7 +249,7 @@ class AttributionPatcher:
         """
         Create the final pruned model by removing low-attribution components.
         """
-        from models import reconstruct_pruned_model
+        from network import reconstruct_pruned_model
         
         # Get model config
         config = {
@@ -258,7 +258,7 @@ class AttributionPatcher:
             'embed_dim': self.model.blocks[0].mlp.fc1.in_features if hasattr(self.model.blocks[0], 'mlp') else EMBED_DIM,
         }
         
-        # Use the reconstruct_pruned_model function from models.py
+        # Use the reconstruct_pruned_model function from network.py
         pruned_model = reconstruct_pruned_model(
             copy.deepcopy(self.model), 
             components_to_remove, 

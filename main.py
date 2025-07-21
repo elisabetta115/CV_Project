@@ -108,7 +108,7 @@ def main():
             print("\n--- Attribution Patching Optimization ---")
             for keep_ratio in args.eap_keep_ratios:
                 print(f"\nOptimizing with EAP keep_ratio={keep_ratio}")
-                cmd = (f"python attribution_patcher.py --keep-ratio {keep_ratio} "
+                cmd = (f"python eap_optimizer.py --keep-ratio {keep_ratio} "
                        f"--model-path {baseline_model_path} "
                        f"--output-base-name {args.eap_base_name}")
                 if run_command(cmd) != 0:
