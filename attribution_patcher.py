@@ -344,7 +344,7 @@ def optimize_model_with_attribution(args):
     
     print(f"\nOptimized model saved to: {save_path}")
     
-    return optimize
+    return optimized_model
 
 def main():
     parser = argparse.ArgumentParser(description='Attribution Patching for Vision Transformer')
