@@ -27,6 +27,12 @@ NUM_WORKERS = 4
 LABEL_SMOOTHING = 0.1   # Label smoothing on loss function
 GRAD_CLIP = 1.0
 
+# Finetune training parameters
+FT_LEARNING_RATE = 1e-4
+FT_NUM_EPOCHS = 5
+FT_WEIGHT_DECAY = 0.05
+FT_LABEL_SMOOTHING = 0.1   # Label smoothing on loss function
+
 # ACDC optimization parameters
 ACDC_THRESHOLD = 0.01  # Threshold for edge importance in ACDC
 ACDC_ANALYSIS_BATCHES = 30  # Number of batches for edge importance analysis

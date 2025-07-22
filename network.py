@@ -60,10 +60,16 @@ class PrunedMultiHeadAttention(nn.Module):
         self.embed_dim = original_attn.embed_dim
         self.head_dim = original_attn.head_dim
         
+        # Get device from original model
+        device = original_attn.qkv.weight.device
+
         # Create new smaller QKV projection
         old_qkv = original_attn.qkv
         new_qkv_dim = self.num_active_heads * self.head_dim * 3
         self.qkv = nn.Linear(self.embed_dim, new_qkv_dim)
+
+        # Move to correct device before copying weights
+        self.qkv = self.qkv.to(device)
         
         # Copy only weights for active heads
         with torch.no_grad():
@@ -85,6 +91,7 @@ class PrunedMultiHeadAttention(nn.Module):
         
         # Output projection - only need size for active heads
         self.proj = nn.Linear(self.num_active_heads * self.head_dim, self.embed_dim)
+        self.proj = self.proj.to(device)
         # Copy weights accordingly
         with torch.no_grad():
             for new_idx, old_idx in enumerate(active_heads):
@@ -139,6 +146,9 @@ class PrunedMLP(nn.Module):
     def __init__(self, original_mlp, fc1_active_neurons=None, fc2_active_neurons=None):
         super().__init__()
         
+        # Get device from original model
+        device = original_mlp.fc1.weight.device
+
         # Get dimensions from original
         embed_dim = original_mlp.fc1.in_features
         mlp_dim = original_mlp.fc1.out_features
@@ -156,15 +166,15 @@ class PrunedMLP(nn.Module):
         self.num_active_fc2 = len(fc2_active_neurons)
         
         # Prune fc1 output neurons
-        self.fc1 = nn.Linear(embed_dim, self.num_active_fc1)
+        self.fc1 = nn.Linear(embed_dim, self.num_active_fc1).to(device)
         
         # For fc2, we'll store only the active weights and use sparse operations
-        self.register_buffer('fc2_active_indices', torch.tensor(fc2_active_neurons, dtype=torch.long))
+        self.register_buffer('fc2_active_indices', torch.tensor(fc2_active_neurons, dtype=torch.long, device=device))
         
         # Store only active weights as parameters
-        self.fc2_active_weight = nn.Parameter(torch.zeros(self.num_active_fc2, self.num_active_fc1))
+        self.fc2_active_weight = nn.Parameter(torch.zeros(self.num_active_fc2, self.num_active_fc1, device=device))
         if original_mlp.fc2.bias is not None:
-            self.fc2_active_bias = nn.Parameter(torch.zeros(self.num_active_fc2))
+            self.fc2_active_bias = nn.Parameter(torch.zeros(self.num_active_fc2, device = device))
         else:
             self.register_parameter('fc2_active_bias', None)
         

@@ -11,7 +11,7 @@ import os
 from globals import *
 from network import VisionTransformer
 from data import create_tiny_imagenet_datasets, collate_fn
-from utils import set_seed, count_effective_parameters
+from utils import set_seed, count_effective_parameters, get_finetuning_args, finetune_pruned_model
 
 
 class AttributionPatcher:
@@ -413,7 +413,7 @@ def optimize_model_with_attribution(args):
     print(f"Optimized parameters: {count_effective_parameters(optimized_model):,}")
     print(f"Parameter reduction: {(1 - count_effective_parameters(optimized_model)/count_effective_parameters(model))*100:.1f}%")
     
-     # Save optimized model
+    # Save optimized model
     save_filename = f"{args.output_base_name}_keep_{args.keep_ratio}.pth"
     save_path = os.path.join(OPTIMIZED_MODEL_DIR, save_filename)
     
@@ -443,6 +443,7 @@ def main():
                         help='Use task-specific loss instead of KL divergence')
     parser.add_argument('--output-base-name', type=str, default=EAP_MODEL_BASE_NAME,
                         help='Base name for output model file')
+    parser = get_finetuning_args(parser)
     
     args = parser.parse_args()
     
@@ -451,6 +452,71 @@ def main():
     
     # Optimize model
     optimized_model = optimize_model_with_attribution(args)
+
+    # Fine-tune if requested
+    if args.finetune_epochs > 0:
+        print("\n" + "="*60)
+        print("Starting fine-tuning phase")
+        print("="*60)
+        
+        # Load datasets
+        train_dataset, val_dataset = create_tiny_imagenet_datasets(
+            DATA_PATH, NORMALIZE_MEAN, NORMALIZE_STD
+        )
+        
+        train_loader = DataLoader(
+            train_dataset, 
+            batch_size=BATCH_SIZE, 
+            shuffle=True, 
+            num_workers=NUM_WORKERS, 
+            pin_memory=True,
+            drop_last=True,
+            collate_fn=collate_fn
+        )
+        val_loader = DataLoader(
+            val_dataset, 
+            batch_size=BATCH_SIZE, 
+            shuffle=False, 
+            num_workers=NUM_WORKERS, 
+            pin_memory=True,
+            drop_last=True
+        )
+        
+        # Fine-tune
+        optimized_model, finetune_history, best_val_acc = finetune_pruned_model(
+            optimized_model, train_loader, val_loader, args, device=DEVICE
+        )
+        
+        # Load original checkpoint for comparison
+        checkpoint = torch.load(args.model_path, map_location=DEVICE)
+        
+        # Load the pruned model info
+        pruned_path = os.path.join(OPTIMIZED_MODEL_DIR, 
+                                   f"{args.output_base_name}_keep_{args.keep_ratio}.pth")
+        pruned_checkpoint = torch.load(pruned_path, map_location=DEVICE)
+        
+        # Save fine-tuned model
+        save_filename = f"{args.output_base_name}_keep_{args.keep_ratio}.pth"
+        save_path = os.path.join(OPTIMIZED_MODEL_DIR, save_filename)
+        
+        torch.save({
+            'model_state_dict': optimized_model.state_dict(),
+            'keep_ratio': args.keep_ratio,
+            'removed_components': pruned_checkpoint['removed_components'],
+            'attribution_scores': pruned_checkpoint['attribution_scores'],
+            'config': checkpoint['config'],
+            'baseline_acc': checkpoint['val_acc'],
+            'pruned_acc': best_val_acc,
+            'finetune_history': finetune_history,
+            'optimization_method': 'eap_finetuned',
+            'finetune_epochs': args.finetune_epochs,
+            'finetune_lr': args.finetune_lr,
+        }, save_path)
+        
+        print(f"\nFine-tuned model saved to: {save_path}")
+        print(f"Baseline accuracy: {checkpoint['val_acc']:.2f}%")
+        print(f"Fine-tuned accuracy: {best_val_acc:.2f}%")
+        print(f"Accuracy change: {best_val_acc - checkpoint['val_acc']:+.2f}%")
     
     print("\nAttribution Patching completed!")
 

@@ -533,6 +533,8 @@ def load_model_from_checkpoint(checkpoint_path):
         for k in unexpected_keys:
             print("  ", k)
 
+    model=model.to(DEVICE)
+
     return model, checkpoint
 
 def main():

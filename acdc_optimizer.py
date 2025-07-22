@@ -10,7 +10,7 @@ from globals import *
 from network import VisionTransformer, PrunedMultiHeadAttention, PrunedMLP
 from data import create_tiny_imagenet_datasets, collate_fn
 
-from utils import set_seed, count_effective_parameters
+from utils import set_seed, count_effective_parameters, get_finetuning_args, finetune_pruned_model
 
 
 class ACDCOptimizer:
@@ -370,26 +370,28 @@ class ACDCOptimizer:
         
         # Handle cls_token removal
         if remove_cls_token:
-            # Replace forward to skip cls_token
-            original_forward = final_model.forward
-            def forward_no_cls(x):
+            # Store original forward method
+            import types
+            
+            def forward_no_cls(self, x):
                 B = x.shape[0]
-                x = final_model.patch_embed(x)
+                x = self.patch_embed(x)
                 # Skip cls_token concatenation
-                x = x + final_model.pos_embed[:, 1:]  # Only use position embeddings for patches
-                x = final_model.dropout(x)
+                x = x + self.pos_embed[:, 1:]  # Only use position embeddings for patches
+                x = self.dropout(x)
                 
-                for block in final_model.blocks:
+                for block in self.blocks:
                     x = block(x)
                 
-                x = final_model.norm(x)
+                x = self.norm(x)
                 # Use mean of all patches instead of cls token
                 x = x.mean(dim=1)
-                x = final_model.head(x)
+                x = self.head(x)
                 return x
             
-            final_model.forward = forward_no_cls.__get__(final_model, type(final_model))
-        
+            # Properly bind the method to the instance
+            final_model.forward = types.MethodType(forward_no_cls, final_model)
+                
         # Handle pos_embed removal (rare but possible)
         if remove_pos_embed:
             with torch.no_grad():
@@ -459,21 +461,6 @@ def optimize_model(args):
     print(f"\nOriginal parameters: {count_effective_parameters(model):,}")
     print(f"Optimized parameters: {count_effective_parameters(optimized_model):,}")
     
-    # Save optimized model
-    save_filename = f"{args.output_base_name}_threshold_{args.threshold}.pth"
-    save_path = os.path.join(OPTIMIZED_MODEL_DIR, save_filename)
-    
-    torch.save({
-        'model_state_dict': optimized_model.state_dict(),
-        'threshold': args.threshold,
-        'removed_components': removed_components,
-        'config': config,
-        'baseline_acc': checkpoint['val_acc'],
-        'optimization_method': 'acdc',
-    }, save_path)
-    
-    print(f"\nOptimized model saved to: {save_path}")
-    
     return optimized_model, removed_components
 
 
@@ -487,7 +474,8 @@ def main():
                         help='Number of batches for KL divergence computation')
     parser.add_argument('--output-base-name', type=str, default=ACDC_MODEL_BASE_NAME,
                         help='Base name for output model file')
-    
+    parser = get_finetuning_args(parser)
+
     args = parser.parse_args()
     
     # Ensure output directory exists
@@ -495,6 +483,83 @@ def main():
     
     # Optimize model
     optimized_model, removed_components = optimize_model(args)
+
+    # Fine-tune if requested
+    if args.finetune_epochs > 0:
+        print("\n" + "="*60)
+        print("Starting fine-tuning phase")
+        print("="*60)
+        
+        # Load datasets
+        train_dataset, val_dataset = create_tiny_imagenet_datasets(
+            DATA_PATH, NORMALIZE_MEAN, NORMALIZE_STD
+        )
+        
+        train_loader = DataLoader(
+            train_dataset, 
+            batch_size=BATCH_SIZE, 
+            shuffle=True, 
+            num_workers=NUM_WORKERS, 
+            pin_memory=True,
+            drop_last=True,
+            collate_fn=collate_fn
+        )
+        val_loader = DataLoader(
+            val_dataset, 
+            batch_size=BATCH_SIZE, 
+            shuffle=False, 
+            num_workers=NUM_WORKERS, 
+            pin_memory=True,
+            drop_last=True
+        )
+        
+        # Fine-tune
+        optimized_model, finetune_history, best_val_acc = finetune_pruned_model(
+            optimized_model, train_loader, val_loader, args, device=DEVICE
+        )
+        
+        # Load original checkpoint for comparison
+        checkpoint = torch.load(args.model_path, map_location=DEVICE)
+        
+        # Save fine-tuned model
+        save_filename = f"{args.output_base_name}_threshold_{args.threshold}.pth"
+        save_path = os.path.join(OPTIMIZED_MODEL_DIR, save_filename)
+        
+        
+        torch.save({
+            'model_state_dict': optimized_model.state_dict(),
+            'threshold': args.threshold,
+            'removed_components': removed_components,
+            'config': checkpoint['config'],
+            'baseline_acc': checkpoint['val_acc'],
+            'pruned_acc': best_val_acc,
+            'finetune_history': finetune_history,
+            'optimization_method': 'acdc_finetuned',
+            'finetune_epochs': args.finetune_epochs,
+            'finetune_lr': args.finetune_lr,
+        }, save_path)
+        
+        print(f"\nFine-tuned model saved to: {save_path}")
+        print(f"Baseline accuracy: {checkpoint['val_acc']:.2f}%")
+        print(f"Fine-tuned accuracy: {best_val_acc:.2f}%")
+        print(f"Accuracy change: {best_val_acc - checkpoint['val_acc']:+.2f}%")
+
+    else:
+        # Save optimized model
+        save_filename = f"{args.output_base_name}_threshold_{args.threshold}.pth"
+        save_path = os.path.join(OPTIMIZED_MODEL_DIR, save_filename)
+        
+        torch.save({
+            'model_state_dict': optimized_model.state_dict(),
+            'threshold': args.threshold,
+            'removed_components': removed_components,
+            'config': checkpoint['config'],
+            'baseline_acc': checkpoint['val_acc'],
+            'optimization_method': 'acdc',
+        }, save_path)
+    
+        print(f"\nOptimized model saved to: {save_path}")
+
     
     print("\nACDC optimization completed!")
 
