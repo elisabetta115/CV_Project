@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+from math import sqrt
 import copy
 import argparse
 import numpy as np
@@ -14,7 +15,7 @@ from utils import set_seed, count_effective_parameters
 
 
 class AttributionPatcher:
-    """Attribution Patching for efficient model pruning using gradient-based importance scores"""
+    """Edge Attribution Patching for model pruning"""
     
     def __init__(self, model, dataloader, device='cuda', use_clean_loss=True):
         self.model = model
@@ -24,147 +25,231 @@ class AttributionPatcher:
         
     def compute_attribution_scores(self, num_batches=20):
         """
-        Compute attribution scores for all model components using gradients.
+        Compute EAP scores by patching attention edges and measuring impact.
         """
         self.model.eval()
-        
-        # Dictionary to store attribution scores for each component
         attribution_scores = {}
         
-        # Process batches
-        all_losses = []
-        for batch_idx, (images, labels) in enumerate(tqdm(self.dataloader, desc="Computing attributions")):
-            if batch_idx >= num_batches:
-                break
+        # Get clean outputs for reference
+        clean_outputs_list = []
+        inputs_list = []
+        labels_list = []
+        
+        with torch.no_grad():
+            for batch_idx, (images, labels) in enumerate(tqdm(self.dataloader, desc="Getting clean outputs")):
+                if batch_idx >= num_batches:
+                    break
+                images = images.to(self.device)
+                labels = labels.to(self.device)
+                outputs = self.model(images)
+                clean_outputs_list.append(outputs)
+                inputs_list.append(images)
+                labels_list.append(labels)
+        
+        # Evaluate each attention head using EAP
+        for block_idx, block in enumerate(self.model.blocks):
+            if isinstance(block, nn.Identity):
+                continue
                 
-            images = images.to(self.device)
-            labels = labels.to(self.device)
-            
-            # Enable gradients for this forward pass
-            self.model.zero_grad()
-            
-            # Forward pass with gradient tracking
-            images.requires_grad = True
-            outputs = self.model(images)
-            
-            if self.use_clean_loss:
-                # Use task-specific loss (classification)
-                loss = nn.CrossEntropyLoss()(outputs, labels)
-            else:
-                # Use KL divergence from reference outputs
-                with torch.no_grad():
-                    reference_outputs = outputs.detach()
-                outputs_2 = self.model(images)
-                loss = nn.KLDivLoss(reduction='batchmean')(
-                    torch.log_softmax(outputs_2, dim=-1),
-                    torch.softmax(reference_outputs, dim=-1)
-                )
-            
-            # Backward pass to compute gradients
-            loss.backward()
-            
-            # Accumulate gradient magnitudes for each component
-            with torch.no_grad():
-                # Attention head scores
-                for block_idx, block in enumerate(self.model.blocks):
-                    if isinstance(block, nn.Identity):
-                        continue
-                        
-                    # Score attention heads by gradient magnitude of QKV projections
-                    if hasattr(block, 'attn'):
-                        attn = block.attn
-                        if hasattr(attn.qkv, 'weight') and attn.qkv.weight.grad is not None:
-                            grad = attn.qkv.weight.grad
-                            num_heads = attn.num_heads
-                            head_dim = attn.embed_dim // num_heads
-                            
-                            # Split gradients by head
-                            for head_idx in range(num_heads):
-                                q_start = head_idx * head_dim
-                                q_end = (head_idx + 1) * head_dim
-                                k_start = attn.embed_dim + head_idx * head_dim
-                                k_end = attn.embed_dim + (head_idx + 1) * head_dim
-                                v_start = 2 * attn.embed_dim + head_idx * head_dim
-                                v_end = 2 * attn.embed_dim + (head_idx + 1) * head_dim
-                                
-                                # Compute attribution score as L2 norm of gradients
-                                head_grad = torch.cat([
-                                    grad[q_start:q_end].flatten(),
-                                    grad[k_start:k_end].flatten(),
-                                    grad[v_start:v_end].flatten()
-                                ])
-                                
-                                key = f'block_{block_idx}_head_{head_idx}'
-                                if key not in attribution_scores:
-                                    attribution_scores[key] = 0
-                                attribution_scores[key] += head_grad.norm().item()
-                    
-                    # Score MLP neurons
-                    if hasattr(block, 'mlp'):
-                        mlp = block.mlp
-                        
-                        # FC1 neuron scores
-                        if hasattr(mlp.fc1, 'weight') and mlp.fc1.weight.grad is not None:
-                            fc1_grad = mlp.fc1.weight.grad
-                            # Group into chunks for efficiency
-                            chunk_size = max(32, fc1_grad.shape[0] // 20)
-                            for chunk_start in range(0, fc1_grad.shape[0], chunk_size):
-                                chunk_end = min(chunk_start + chunk_size, fc1_grad.shape[0])
-                                chunk_grad = fc1_grad[chunk_start:chunk_end]
-                                
-                                key = f'block_{block_idx}_fc1_chunk_{chunk_start}_{chunk_end}'
-                                if key not in attribution_scores:
-                                    attribution_scores[key] = 0
-                                attribution_scores[key] += chunk_grad.norm().item()
-                        
-                        # FC2 neuron scores
-                        if hasattr(mlp.fc2, 'weight') and mlp.fc2.weight.grad is not None:
-                            fc2_grad = mlp.fc2.weight.grad
-                            # Group into chunks
-                            chunk_size = max(32, fc2_grad.shape[0] // 10)
-                            for chunk_start in range(0, fc2_grad.shape[0], chunk_size):
-                                chunk_end = min(chunk_start + chunk_size, fc2_grad.shape[0])
-                                # For FC2, we look at gradients of weights going TO these output neurons
-                                chunk_grad = fc2_grad[chunk_start:chunk_end, :]
-                                
-                                key = f'block_{block_idx}_fc2_chunk_{chunk_start}_{chunk_end}'
-                                if key not in attribution_scores:
-                                    attribution_scores[key] = 0
-                                attribution_scores[key] += chunk_grad.norm().item()
-                    
-                    # Score entire blocks
-                    block_score = 0
-                    for name, param in block.named_parameters():
-                        if param.grad is not None:
-                            block_score += param.grad.norm().item()
-                    
-                    key = f'block_{block_idx}'
-                    if key not in attribution_scores:
-                        attribution_scores[key] = 0
-                    attribution_scores[key] += block_score
+            if hasattr(block, 'attn'):
+                attn = block.attn
+                num_heads = attn.num_heads
                 
-                # Score cls_token and pos_embed
-                if self.model.cls_token.grad is not None:
-                    if 'cls_token' not in attribution_scores:
-                        attribution_scores['cls_token'] = 0
-                    attribution_scores['cls_token'] += self.model.cls_token.grad.norm().item()
+                for head_idx in range(num_heads):
+                    # Patch this specific head
+                    head_score = self._evaluate_attention_head_eap(
+                        block_idx, head_idx, inputs_list, clean_outputs_list, labels_list
+                    )
+                    
+                    key = f'block_{block_idx}_head_{head_idx}'
+                    attribution_scores[key] = head_score
+            
+            # Evaluate MLP neurons using node patching
+            if hasattr(block, 'mlp'):
+                mlp = block.mlp
                 
-                if self.model.pos_embed.grad is not None:
-                    if 'pos_embed' not in attribution_scores:
-                        attribution_scores['pos_embed'] = 0
-                    attribution_scores['pos_embed'] += self.model.pos_embed.grad.norm().item()
+                # Evaluate FC1 neurons in chunks
+                fc1_dim = mlp.fc1.out_features
+                chunk_size = max(32, fc1_dim // 20)
+                
+                for chunk_start in range(0, fc1_dim, chunk_size):
+                    chunk_end = min(chunk_start + chunk_size, fc1_dim)
+                    
+                    chunk_score = self._evaluate_mlp_neurons_eap(
+                        block_idx, 'fc1', chunk_start, chunk_end, 
+                        inputs_list, clean_outputs_list, labels_list
+                    )
+                    
+                    key = f'block_{block_idx}_fc1_chunk_{chunk_start}_{chunk_end}'
+                    attribution_scores[key] = chunk_score
+                
+                # Evaluate FC2 output dimensions in chunks
+                fc2_dim = mlp.fc2.out_features
+                chunk_size = max(32, fc2_dim // 10)
+                
+                for chunk_start in range(0, fc2_dim, chunk_size):
+                    chunk_end = min(chunk_start + chunk_size, fc2_dim)
+                    
+                    chunk_score = self._evaluate_mlp_neurons_eap(
+                        block_idx, 'fc2', chunk_start, chunk_end,
+                        inputs_list, clean_outputs_list, labels_list
+                    )
+                    
+                    key = f'block_{block_idx}_fc2_chunk_{chunk_start}_{chunk_end}'
+                    attribution_scores[key] = chunk_score
             
-            all_losses.append(loss.item())
-            
-        # Average scores across batches
-        num_batches_processed = min(num_batches, batch_idx + 1)
-        for key in attribution_scores:
-            attribution_scores[key] /= num_batches_processed
-            
-        print(f"Average loss: {np.mean(all_losses):.4f}")
+            # Evaluate entire block
+            block_score = self._evaluate_block_eap(
+                block_idx, inputs_list, clean_outputs_list, labels_list
+            )
+            attribution_scores[f'block_{block_idx}'] = block_score
         
         return attribution_scores
     
+    def _evaluate_attention_head_eap(self, block_idx, head_idx, inputs_list, clean_outputs_list, labels_list):
+        """Evaluate a single attention head using edge patching."""
+        total_impact = 0
+        
+        # Store the original attention module
+        attn_module = self.model.blocks[block_idx].attn
+        original_forward = attn_module.forward
+        
+        def patched_forward(x):
+            B, N, C = x.shape
+            
+            # Run through QKV projection
+            qkv = attn_module.qkv(x).reshape(B, N, 3, attn_module.num_heads, C // attn_module.num_heads).permute(2, 0, 3, 1, 4)
+            q, k, v = qkv.unbind(0)
+            
+            # Compute attention scores
+            attn = (q @ k.transpose(-2, -1)) * (1.0 / sqrt(q.size(-1)))
+            attn = attn.softmax(dim=-1)
+            
+            # Corrupt the specific head's attention by setting to uniform
+            attn[:, head_idx, :, :] = 1.0 / attn.shape[-1]
+            
+            # Continue with the rest of the forward pass
+            x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+            x = attn_module.proj(x)
+            
+            # Apply proj_drop if it exists
+            if hasattr(attn_module, 'proj_drop'):
+                x = attn_module.proj_drop(x)
+            
+            return x
+        
+        # Apply the patch
+        attn_module.forward = patched_forward
+        
+        try:
+            with torch.no_grad():
+                for images, clean_outputs, labels in zip(inputs_list, clean_outputs_list, labels_list):
+                    # Get corrupted outputs
+                    corrupted_outputs = self.model(images)
+                    
+                    if self.use_clean_loss:
+                        # Measure impact as increase in classification loss
+                        clean_loss = nn.CrossEntropyLoss()(clean_outputs, labels).item()
+                        corrupted_loss = nn.CrossEntropyLoss()(corrupted_outputs, labels).item()
+                        impact = corrupted_loss - clean_loss
+                    else:
+                        # Measure impact as KL divergence
+                        impact = nn.KLDivLoss(reduction='batchmean')(
+                            torch.log_softmax(corrupted_outputs, dim=-1),
+                            torch.softmax(clean_outputs, dim=-1)
+                        ).item()
+                    
+                    total_impact += impact
+        finally:
+            # Restore original forward method
+            attn_module.forward = original_forward
+        
+        return total_impact / len(inputs_list)
+
+    def _evaluate_mlp_neurons_eap(self, block_idx, layer_name, start_idx, end_idx, 
+                                inputs_list, clean_outputs_list, labels_list):
+        """Evaluate MLP neurons by zeroing their activations."""
+        total_impact = 0
+        
+        def corrupt_neurons_hook(module, input, output):
+            # Zero out specified neurons
+            corrupted_output = output.clone()
+            if len(corrupted_output.shape) == 3:  # (B, N, C)
+                corrupted_output[:, :, start_idx:end_idx] = 0
+            elif len(corrupted_output.shape) == 2:  # (B, C)
+                corrupted_output[:, start_idx:end_idx] = 0
+            return corrupted_output
+        
+        # Register hook on appropriate layer
+        if layer_name == 'fc1':
+            # Hook after activation function (GELU)
+            if hasattr(self.model.blocks[block_idx].mlp, 'activation'):
+                target_module = self.model.blocks[block_idx].mlp.activation
+            elif hasattr(self.model.blocks[block_idx].mlp, 'act'):
+                target_module = self.model.blocks[block_idx].mlp.act
+            else:
+                # Hook on fc1 output directly
+                target_module = self.model.blocks[block_idx].mlp.fc1
+        else:  # fc2
+            target_module = self.model.blocks[block_idx].mlp.fc2
+            
+        handle = target_module.register_forward_hook(corrupt_neurons_hook)
+        
+        try:
+            with torch.no_grad():
+                for images, clean_outputs, labels in zip(inputs_list, clean_outputs_list, labels_list):
+                    corrupted_outputs = self.model(images)
+                    
+                    if self.use_clean_loss:
+                        # Measure impact as increase in classification loss
+                        clean_loss = nn.CrossEntropyLoss()(clean_outputs, labels).item()
+                        corrupted_loss = nn.CrossEntropyLoss()(corrupted_outputs, labels).item()
+                        impact = corrupted_loss - clean_loss
+                    else:
+                        # Measure impact as KL divergence
+                        impact = nn.KLDivLoss(reduction='batchmean')(
+                            torch.log_softmax(corrupted_outputs, dim=-1),
+                            torch.softmax(clean_outputs, dim=-1)
+                        ).item()
+                    
+                    total_impact += impact
+        finally:
+            handle.remove()
+        
+        return total_impact / len(inputs_list)
+
+    def _evaluate_block_eap(self, block_idx, inputs_list, clean_outputs_list, labels_list):
+        """Evaluate entire block by replacing with identity."""
+        total_impact = 0
+        
+        # Temporarily replace block with identity
+        original_block = self.model.blocks[block_idx]
+        self.model.blocks[block_idx] = nn.Identity()
+        
+        try:
+            with torch.no_grad():
+                for images, clean_outputs, labels in zip(inputs_list, clean_outputs_list, labels_list):
+                    corrupted_outputs = self.model(images)
+                    
+                    if self.use_clean_loss:
+                        # Measure impact as increase in classification loss
+                        clean_loss = nn.CrossEntropyLoss()(clean_outputs, labels).item()
+                        corrupted_loss = nn.CrossEntropyLoss()(corrupted_outputs, labels).item()
+                        impact = corrupted_loss - clean_loss
+                    else:
+                        # Measure impact as KL divergence
+                        impact = nn.KLDivLoss(reduction='batchmean')(
+                            torch.log_softmax(corrupted_outputs, dim=-1),
+                            torch.softmax(clean_outputs, dim=-1)
+                        ).item()
+                    
+                    total_impact += impact
+        finally:
+            # Restore original block
+            self.model.blocks[block_idx] = original_block
+        
+        return total_impact / len(inputs_list)
+        
     def select_components_to_remove(self, attribution_scores, keep_ratio=0.9):
         """
         Select components to remove based on attribution scores.
@@ -365,7 +450,7 @@ def main():
     os.makedirs(OPTIMIZED_MODEL_DIR, exist_ok=True)
     
     # Optimize model
-    optimized_model, removed_components = optimize_model_with_attribution(args)
+    optimized_model = optimize_model_with_attribution(args)
     
     print("\nAttribution Patching completed!")
 

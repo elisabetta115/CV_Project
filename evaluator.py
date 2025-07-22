@@ -239,7 +239,7 @@ class ModelEvaluator:
         ax.set_title('Classification Performance Metrics')
         ax.set_xticks(x + width)
         ax.set_xticklabels(model_names, rotation=45, ha='right')
-        ax.legend()
+        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
         ax.grid(axis='y', alpha=0.3)
         
         # Inference time and efficiency

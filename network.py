@@ -135,7 +135,7 @@ class MLP(nn.Module):
         return x
     
 class PrunedMLP(nn.Module):
-    """MLP module with neuron pruning"""
+    """MLP module with neuron pruning using sparse tensors"""
     def __init__(self, original_mlp, fc1_active_neurons=None, fc2_active_neurons=None):
         super().__init__()
         
@@ -152,10 +152,22 @@ class PrunedMLP(nn.Module):
         self.fc1_active = fc1_active_neurons
         self.fc2_active = fc2_active_neurons
         self.embed_dim = embed_dim
+        self.num_active_fc1 = len(fc1_active_neurons)
+        self.num_active_fc2 = len(fc2_active_neurons)
         
-        # Prune INPUT neurons (from fc1), 
-        self.fc1 = nn.Linear(embed_dim, len(fc1_active_neurons))
-        self.fc2 = nn.Linear(len(fc1_active_neurons), embed_dim)
+        # Prune fc1 output neurons
+        self.fc1 = nn.Linear(embed_dim, self.num_active_fc1)
+        
+        # For fc2, we'll store only the active weights and use sparse operations
+        self.register_buffer('fc2_active_indices', torch.tensor(fc2_active_neurons, dtype=torch.long))
+        
+        # Store only active weights as parameters
+        self.fc2_active_weight = nn.Parameter(torch.zeros(self.num_active_fc2, self.num_active_fc1))
+        if original_mlp.fc2.bias is not None:
+            self.fc2_active_bias = nn.Parameter(torch.zeros(self.num_active_fc2))
+        else:
+            self.register_parameter('fc2_active_bias', None)
+        
         self.act = original_mlp.act
         self.dropout = original_mlp.dropout
         
@@ -167,31 +179,36 @@ class PrunedMLP(nn.Module):
                 if self.fc1.bias is not None:
                     self.fc1.bias.data[new_idx] = original_mlp.fc1.bias.data[old_idx]
             
-            # FC2: Select active input neurons, but keep all output neurons
-            # Zero out the entire FC2
-            self.fc2.weight.data.zero_()
-            if self.fc2.bias is not None:
-                self.fc2.bias.data.zero_()
-            
-            # Copy weights for active connections only
-            for new_in_idx, old_in_idx in enumerate(fc1_active_neurons):
-                # Copy weights for active FC2 output neurons
-                for out_idx in fc2_active_neurons:
-                    self.fc2.weight.data[out_idx, new_in_idx] = \
-                        original_mlp.fc2.weight.data[out_idx, old_in_idx]
-            
-            # Copy bias only for active output neurons
-            if self.fc2.bias is not None:
-                for out_idx in fc2_active_neurons:
-                    self.fc2.bias.data[out_idx] = original_mlp.fc2.bias.data[out_idx]
+            # FC2: Copy only active weights
+            for new_out_idx, out_idx in enumerate(fc2_active_neurons):
+                for new_in_idx, in_idx in enumerate(fc1_active_neurons):
+                    self.fc2_active_weight.data[new_out_idx, new_in_idx] = \
+                        original_mlp.fc2.weight.data[out_idx, in_idx]
+                
+                if self.fc2_active_bias is not None:
+                    self.fc2_active_bias.data[new_out_idx] = original_mlp.fc2.bias.data[out_idx]
     
     def forward(self, x):
+        B, N, _ = x.shape
+        
+        # Pass through fc1
         x = self.fc1(x)
         x = self.act(x)
         x = self.dropout(x)
-        x = self.fc2(x)
-        x = self.dropout(x)
-        return x
+        
+        # Efficient fc2 computation
+        if self.num_active_fc2 == 0:
+            return torch.zeros(B, N, self.embed_dim, device=x.device, dtype=x.dtype)
+        
+        # Compute only active outputs
+        x_active = F.linear(x, self.fc2_active_weight, self.fc2_active_bias)
+        
+        # Create output tensor and fill active positions
+        output = torch.zeros(B, N, self.embed_dim, device=x.device, dtype=x.dtype)
+        output[:, :, self.fc2_active_indices] = x_active
+        
+        output = self.dropout(output)
+        return output
 
 
 class TransformerBlock(nn.Module):
